@@ -1,0 +1,119 @@
+import os
+import requests
+import json
+import uuid
+from bs4 import BeautifulSoup
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from gtts import gTTS
+from pydub import AudioSegment
+import chardet  # библиотека для определения кодировки
+
+# === НАСТРОЙКИ ===
+TELEGRAM_TOKEN =  сюда подставь свой телеграм токен "  # здесь необходимо вставить свои данные
+OPENROUTER_API_KEY = "сюда подставь свой API от openrouter "   # здесь необходимо вставить свои данные
+
+# === AI-ответ через DeepSeek ===
+async def ask_ai(question):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://replit.com/",
+        "X-Title": "ReplitBot",
+    }
+    data = {
+        "model": "deepseek/deepseek-chat-v3-0324:free",
+        "messages": [{"role": "user", "content": question}],
+    }
+
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    response.raise_for_status()
+    result = response.json()
+    return result["choices"][0]["message"]["content"]
+
+# === Генерация голосового файла ===
+def text_to_voice(text):
+    tts = gTTS(text=text, lang="ru")
+    temp_mp3 = f"{uuid.uuid4()}.mp3"
+    temp_ogg = f"{uuid.uuid4()}.ogg"
+
+    tts.save(temp_mp3)
+    AudioSegment.from_mp3(temp_mp3).export(temp_ogg, format="ogg", codec="libopus")
+
+    os.remove(temp_mp3)
+    return temp_ogg
+
+# === Разделение текста на части по ~5 минут ===
+def split_text(text, max_chars=3000):
+    paragraphs = text.split('\n')
+    chunks, current_chunk = [], ""
+    for p in paragraphs:
+        if len(current_chunk) + len(p) < max_chars:
+            current_chunk += p + "\n"
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = p + "\n"
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
+
+# === Определение кодировки файла ===
+def detect_encoding(file_path):
+    with open(file_path, "rb") as file:
+        raw_data = file.read()
+        result = chardet.detect(raw_data)
+        return result['encoding']
+
+# === Обработка FB2 файла ===
+async def handle_fb2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = await context.bot.get_file(update.message.document.file_id)
+    fb2_path = f"{uuid.uuid4()}.fb2"
+    await file.download_to_drive(fb2_path)
+
+    try:
+        encoding = detect_encoding(fb2_path)  # Определяем кодировку файла
+        with open(fb2_path, "r", encoding=encoding, errors="ignore") as f:
+            soup = BeautifulSoup(f, "xml")
+            body = soup.find("body")
+            full_text = body.get_text(separator="\n") if body else ""
+
+        parts = split_text(full_text)
+        for part in parts:
+            voice_path = text_to_voice(part)
+            with open(voice_path, "rb") as voice:
+                await update.message.reply_voice(voice)
+            os.remove(voice_path)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка обработки файла: {e}")
+    finally:
+        os.remove(fb2_path)
+
+# === Обработка текстовых сообщений ===
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
+    try:
+        ai_response = await ask_ai(user_message)
+        voice_path = text_to_voice(ai_response)
+        with open(voice_path, "rb") as voice:
+            await update.message.reply_voice(voice)
+        os.remove(voice_path)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+# === Команда /start ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Отправь мне любой вопрос и я отвечу тебе голосом или отправь мне fb2 файл, и я озвучу тебе текст. Приятного прослушивания в дороге! 📚🎧")
+
+# === Запуск бота ===
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Проверка на расширение файла .fb2
+    app.add_handler(MessageHandler(filters.Document.ALL, lambda update, context: handle_fb2(update, context) if update.message.document.file_name.endswith('.fb2') else None))
+
+    print("Бот запущен.")
+    app.run_polling()
