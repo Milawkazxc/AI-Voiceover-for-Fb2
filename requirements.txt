@@ -1,0 +1,7 @@
+requests==2.32.3
+gTTS==2.5.4
+pydub==0.25.1
+python-telegram-bot==20.7
+beautifulsoup4==4.12.0
+lxml==4.9.3
+uuid==1.30
